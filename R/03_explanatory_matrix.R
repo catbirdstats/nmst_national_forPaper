@@ -106,7 +106,11 @@ veg_and_expl$...7 <- NULL
 save(veg, time_component_no, time_component_yes, time_based_avgs,
      file = here::here("data", "compiled", "veg_and_expl_dfs.RData"))
 
-
+# write out joined csv  
+write.csv(veg_and_expl,
+          file = here::here("data", "compiled", "veg_and_expl.csv"),
+          row.names = FALSE,
+          na = "")
 
 # AFTER THIS POINT, TRANSITION TO NATIONAL SLOPE DF CONSTRUCTION.R
 

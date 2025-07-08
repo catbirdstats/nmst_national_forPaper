@@ -1,0 +1,555 @@
+---
+title: "Namaste National Analyses"
+subtitle: "Ordinations of zone- and plot- level changes"
+output-file: "2025-07-08 Nat'l Multivar by Zone and Plot"
+date: today
+format: 
+    html:
+        toc: true
+        toc-location: left
+        echo: false
+        embed-resources: true
+    pdf:
+        toc: true
+        echo: false
+warning: false
+message: false
+error: true
+fig-width: 7
+fig-height: 5
+---
+
+Latest update: 
+
+7-8-25 - using updated explanatory matrices; EMI is now the name in the data frame.
+
+1-27-25 - change EIR to EMI. Only changed in the code; did not re-generate national data frames. Also added random seeds to bioenv and nmds in zone-level ordinations (already present for plot-level).  
+
+12-3-24 - making a separate NMDS plot for each region, in plot-level section. rendered output file on 12-14-24.
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggrepel)
+library(ecole)
+library(doParallel)
+```
+
+# Zone-level Ordination  
+
+```{r}
+# For the first portion of this doc, use the "slopes" by zone data frame - changes at the zone-within-site level. 
+dat <- read.csv(here::here("data",
+                           "compiled",
+                           "slopesAndExpl_byZone.csv"))
+
+dat_main <- dat %>% 
+    select(Reserve,
+           SiteID,
+           Vegetation_Zone,
+           Total.unvegetated_slope,
+           Total.live.veg_slope,
+           EMI_slope,
+           H.Halophyte_slope,
+           Richness_slope,
+           SWdiv_slope,
+           tide_range_slope:Region,
+           condition = NERRs_Landscape_resiliency_condition_sum_quantile,
+           SET_change:last_col()
+    ) %>% 
+    mutate(
+        # replace the H.Halophyte NAs with 0 because no Halophytes at this site
+        H.Halophyte_slope = case_when(is.na(H.Halophyte_slope) ~ 0, 
+                                      .default = H.Halophyte_slope),
+        # fix Geomorphyology
+        Geomorphology = case_when(Geomorphology == "Back Barrier" ~ "Back barrier",
+                                  .default = Geomorphology),
+        # turn character cols into factors
+        across(where(is.character), as.factor),
+        # turn appropriate columns into ordered factors
+        Vegetation_Zone = factor(Vegetation_Zone, levels = c("Low", "Mid", "Up"), ordered = TRUE),
+        Tidal_Range = factor(Tidal_Range, levels = c("Microtidal", "Mesotidal", "Macrotidal"), ordered = TRUE),
+        Salinity_category = factor(Salinity_category,
+                                   levels = c("Fresh", "Oligohaline",
+                                              "Mesohaline", "Polyhaline"), ordered = TRUE)
+    ) 
+
+responses <- dat_main %>% 
+    select(Total.unvegetated_slope:SWdiv_slope)
+row.names(responses) = paste(dat_main$Reserve, dat_main$SiteID, dat_main$Vegetation_Zone, sep = "-")
+
+responses_scaled <- responses %>% 
+    mutate(across(everything(), function(x) scale(x)[,1]))
+
+explanatory <- dat_main[which(!(names(dat_main) %in% names(responses)))]
+
+explanatory_scaled <- explanatory %>% 
+    mutate(across(where(is.numeric), 
+                  function(x) scale(x)[,1]))
+
+explanatory_scaled_main <- explanatory_scaled %>% 
+    select(Geomorphology, Tidal_Range, Salinity_category,
+           SLR_last19yrs, NERR_Region, condition,
+           SET_minus_SLR_19yrs, Vegetation_Zone)
+```
+
+
+```{r}
+set.seed(2025)
+test_bioenv <- bioenv(responses_scaled, explanatory_scaled_main, 
+                      method = "spearman",
+                      index = "euclidean",
+                      metric = "gower")
+
+
+cat("Explanatory variables used in bioenv: \n", paste("*", names(explanatory_scaled_main)), sep = "\n")
+
+test_bioenv
+
+summary(test_bioenv)
+```
+
+## NMDS  
+
+```{r}
+set.seed(127)
+veg_mds <- metaMDS(responses_scaled,
+                   distance = "euclidean",
+                   autotransform = FALSE,
+                   trace = FALSE)
+cat("2-dimensional stress: ", round(veg_mds$stress, 3))
+```
+
+```{r}
+data.scores <- as.data.frame(scores(veg_mds))
+loadings <- as.data.frame(scores(envfit(veg_mds, responses_scaled), display = "vectors")) * 5
+
+# numeric explanatory loadings
+expl_numeric <- explanatory_scaled %>% 
+    select(SLR_last19yrs,
+           condition,
+           SET_minus_SLR_19yrs,
+           Vegetation_Zone)
+
+env_expl <- as.data.frame(scores(envfit(veg_mds, expl_numeric, na.rm = TRUE), display = "vectors")) * 7
+
+```
+
+
+
+```{r}
+# plot all sites
+p <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_text(label = rownames(responses_scaled),
+              size = rel(3)) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+p
+
+# points only
+ppts <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_point() +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+```
+
+## Numeric Loadings overlaid - all  
+
+```{r}
+p2 <- ppts +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue")
+
+p2
+```
+
+
+## Color by categorical predictors that were important in bioenv  
+
+Salinity Category, NERR Region, and Vegetation Zone  
+
+(condition was the only quantitative variable from bioenv)  
+
+```{r}
+nmds_and_expl <- cbind(data.scores, explanatory_scaled_main)
+```
+
+```{r}
+plot_nmds2 <- function(expl_color, expl_shape = NULL){
+    
+p <- ggplot(nmds_and_expl,
+            aes(x = NMDS1,
+                y = NMDS2,
+                col = {{expl_color}})) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue") +
+    geom_point(aes(shape = {{expl_shape}}),
+               size = 3, alpha = 0.8) +
+    khroma::scale_color_muted() +
+    theme_bw() +
+    labs(title = "NMDS")
+
+p
+}
+```
+
+```{r}
+plot_nmds2(NERR_Region, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+## Interactive NMDS output  
+
+Note this is not 3D, but you can zoom in on the clustered points.  
+
+```{r}
+p_interact <- plot_nmds2(NERR_Region, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+
+plotly::ggplotly(p_interact)
+```
+
+
+```{r}
+plot_nmds2(Salinity_category, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+```{r}
+plot_nmds2(Vegetation_Zone, Salinity_category) +
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+
+
+## Bio-env best model graph  
+
+
+```{r}
+env_expl <- env_expl[2, ]
+```
+
+```{r}
+plot_nmds2(NERR_Region, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+
+```{r}
+plot_nmds2(Salinity_category, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+```{r}
+plot_nmds2(Vegetation_Zone, Salinity_category) +
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+
+# Plot-level Ordination  
+
+Leaving out Halophyte slope completely because many plots will not have any of certain species groups, so we'll only focus on what's calculated for all.  
+
+ 
+```{r}
+# Now use the "plots" level data frame
+# clean up the workspace first
+
+envir <- ls()
+envir <- envir[-which(envir == "plot_nmds2")]
+rm(list = envir)
+
+dat <- read.csv(here::here("data",
+                           "compiled",
+                           "slopesAndExpl_byPlot.csv"))
+
+dat_main <- dat %>% 
+    select(Reserve,
+           SiteID,
+           TransectID,
+           PlotID,
+           Vegetation_Zone,
+           Total.unvegetated_slope,
+           Total.live.veg_slope,
+           EMI_slope,
+           Richness_slope,
+           SWdiv_slope,
+           tide_range_slope:Region,
+           condition = NERRs_Landscape_resiliency_condition_sum_quantile,
+           SET_change:last_col()
+    ) %>% 
+    mutate(
+        # fix Geomorphyology
+        Geomorphology = case_when(Geomorphology == "Back Barrier" ~ "Back barrier",
+                                  .default = Geomorphology),
+        # turn character cols into factors
+        across(where(is.character), as.factor),
+        # turn appropriate columns into ordered factors
+        Vegetation_Zone = factor(Vegetation_Zone, levels = c("Low", "Mid", "Up"), ordered = TRUE),
+        Tidal_Range = factor(Tidal_Range, levels = c("Microtidal", "Mesotidal", "Macrotidal"), ordered = TRUE),
+        Salinity_category = factor(Salinity_category,
+                                   levels = c("Fresh", "Oligohaline",
+                                              "Mesohaline", "Polyhaline"), ordered = TRUE)
+    ) 
+
+responses <- dat_main %>% 
+    select(Total.unvegetated_slope:SWdiv_slope)
+row.names(responses) = paste(dat_main$Reserve, dat_main$SiteID, dat_main$TransectID, dat_main$PlotID, sep = "-")
+
+responses_scaled <- responses %>% 
+    mutate(across(everything(), function(x) scale(x)[,1]))
+
+explanatory <- dat_main[which(!(names(dat_main) %in% names(responses)))]
+
+explanatory_scaled <- explanatory %>% 
+    mutate(across(where(is.numeric), 
+                  function(x) scale(x)[,1]))
+
+explanatory_scaled_main <- explanatory_scaled %>% 
+    select(Geomorphology, Tidal_Range, Salinity_category,
+           SLR_last19yrs, NERR_Region, condition,
+           SET_minus_SLR_19yrs, Vegetation_Zone)
+```
+
+
+```{r}
+
+cl <- makeCluster(10)  
+registerDoParallel(cl)
+clusterEvalQ(cl, library(vegan))
+
+set.seed(2024)
+test_bioenv <- bioenv(responses_scaled, explanatory_scaled_main, 
+                      method = "spearman",
+                      index = "euclidean",
+                      metric = "gower",
+                      parallel = cl)
+
+stopCluster(cl)
+
+
+cat("Explanatory variables used in bioenv: \n", paste("*", names(explanatory_scaled_main)), sep = "\n")
+
+test_bioenv
+
+summary(test_bioenv)
+```
+
+## NMDS  
+
+```{r}
+cl <- makeCluster(10)  
+registerDoParallel(cl)
+clusterEvalQ(cl, library(vegan))
+
+
+set.seed(2024)
+veg_mds <- metaMDS(responses_scaled,
+                   distance = "euclidean",
+                   autotransform = FALSE,
+                   trace = FALSE,
+                   parallel = cl)
+cat("2-dimensional stress: ", round(veg_mds$stress, 3))
+
+stopCluster(cl)
+```
+
+```{r}
+data.scores <- as.data.frame(scores(veg_mds))
+loadings <- as.data.frame(scores(envfit(veg_mds, responses_scaled), display = "vectors")) * 7
+
+# numeric explanatory loadings
+expl_numeric <- explanatory_scaled %>% 
+    select(SLR_last19yrs,
+           condition,
+           SET_minus_SLR_19yrs,
+           Vegetation_Zone)
+
+env_expl <- as.data.frame(scores(envfit(veg_mds, expl_numeric, na.rm = TRUE), display = "vectors")) * 15
+
+```
+
+
+
+```{r}
+# plot all sites
+p <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_text(label = rownames(responses_scaled),
+              size = rel(3)) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+
+
+# points only
+ppts <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_point(alpha = 0.4) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+ppts
+```
+
+## Numeric Loadings overlaid - all  
+
+```{r}
+p2 <- ppts +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue")
+
+p2
+```
+
+
+## Color by categorical predictors that were important in bioenv  
+
+Salinity Category, NERR Region, and Vegetation Zone  
+
+(condition was the only quantitative variable from bioenv)  
+
+```{r}
+nmds_and_expl <- cbind(data.scores, explanatory_scaled_main)
+
+# get Reserve in there too, post bio-env
+nmds_and_expl$Reserve <- explanatory$Reserve
+```
+
+```{r}
+plot_nmds2 <- function(expl_color, expl_shape = NULL){
+    
+p <- ggplot(nmds_and_expl,
+            aes(x = NMDS1,
+                y = NMDS2,
+                col = {{expl_color}})) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue") +
+    geom_point(aes(shape = {{expl_shape}}),
+               size = 3, alpha = 0.5) +
+    khroma::scale_color_muted() +
+    theme_bw() +
+    labs(title = "NMDS")
+
+p
+}
+```
+
+```{r}
+plot_nmds2(NERR_Region, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+
+### By Region  
+
+```{r}
+regs <- levels(nmds_and_expl$NERR_Region)
+nmds_and_expl_full <- nmds_and_expl
+for(i in seq_along(regs)){
+    nmds_and_expl <- nmds_and_expl_full %>% 
+        filter(NERR_Region == regs[i])
+    
+    print(plot_nmds2(Reserve, Vegetation_Zone) +
+        labs(title = paste0("NMDS for ", regs[i])))
+    
+}
+
+# re-make original data frame
+nmds_and_expl <- nmds_and_expl_full
+```
+
+
+
+## Bio-env best model graph  
+
+
+```{r}
+env_expl <- env_expl[2, ]
+```
+
+```{r}
+plot_nmds2(NERR_Region, Vegetation_Zone) + 
+    labs(title = "NMDS for all regions", 
+         subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+

@@ -1,0 +1,508 @@
+---
+title: "Namaste National Analyses"
+subtitle: "PERMANOVA and Ordination of site-level vegetation community change"
+output-file: "2025-07-08 Nat'l Multivar by Site"
+date: today
+format: 
+    html:
+        toc: true
+        toc-location: left
+        echo: false
+        embed-resources: true
+    pdf:
+        toc: true
+        echo: false
+warning: false
+message: false
+error: true
+fig-width: 7
+fig-height: 5
+---
+
+Latest update:
+
+7-8-25 - national data frames have been regenerated; there were some errors in earlier inclusions/exclusions but the explanatory matrix has been updated. The data frames now use "EMI" rather than "EIR".
+
+1-27-25 - change EIR to EMI. Only changed in the code; did not re-generate national data frames. Also added random seed before permanovas.  
+
+12-14-24 - incorporate NMDS of environmental variables; add random seeds before all nmds and bioenv runs
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggrepel)
+library(ecole)
+```
+
+
+ 
+
+```{r}
+# Using the "slopes" by site data frame - changes at the site level. 
+
+dat <- read.csv(here::here("data",
+                           "compiled",
+                           "slopesAndExpl_bySite.csv"))
+
+dat_main <- dat %>% 
+    select(Reserve,
+           SiteID,
+           Total.unvegetated_slope,
+           Total.live.veg_slope,
+           EMI_slope,
+           H.Halophyte_slope,
+           Richness_slope,
+           SWdiv_slope,
+           tide_range_slope:Region,
+           condition = NERRs_Landscape_resiliency_condition_sum_quantile,
+           SET_change:last_col()
+    ) %>% 
+    mutate(
+        # replace the H.Halophyte NA with 0; no halophytes at site
+        H.Halophyte_slope = case_when(is.na(H.Halophyte_slope) ~ 0,
+                                      .default = H.Halophyte_slope),
+        # fix Geomorphyology
+        Geomorphology = case_when(Geomorphology == "Back Barrier" ~ "Back barrier",
+                                  .default = Geomorphology),
+        # turn character cols into factors
+        across(where(is.character), as.factor),
+        # turn appropriate columns into ordered factors
+        Tidal_Range = factor(Tidal_Range, levels = c("Microtidal", "Mesotidal", "Macrotidal"), ordered = TRUE),
+        Salinity_category = factor(Salinity_category,
+                                   levels = c("Fresh", "Oligohaline",
+                                              "Mesohaline", "Polyhaline"), ordered = TRUE)
+    ) 
+
+responses <- dat_main %>% 
+    select(Total.unvegetated_slope:SWdiv_slope)
+row.names(responses) = paste(dat_main$Reserve, dat_main$SiteID, sep = "-")
+
+responses_scaled <- responses %>% 
+    mutate(across(everything(), function(x) scale(x)[,1]))
+
+explanatory <- dat_main[which(!(names(dat_main) %in% names(responses)))]
+
+explanatory_scaled <- explanatory %>% 
+    mutate(across(where(is.numeric), 
+                  function(x) scale(x)[,1]))
+
+explanatory_scaled_main <- explanatory_scaled %>% 
+    select(Geomorphology, Tidal_Range, Salinity_category,
+           SLR_last19yrs, NERR_Region, condition,
+           SET_minus_SLR_19yrs, proportion_low)
+```
+
+
+
+
+# PERMANOVA  
+
+One PERMANOVA for each key factor we care about. Setting this up like a multiple regression means each predictor's effect (and p-value) is influenced by what other predictors are present in the model. We just want to know if, overall, aside from anything else, each of these are different.  
+
+If a PERMANOVA is significant for a factor, then pairwise comparisons will be run: pairwise PERMANOVAs to see which groups are different from which other groups. We had planned to run SIMPER, to assess which changes are contributing most to group differences; but SIMPER is based on Bray-Curtis dissimilarity and we are using Euclidean distance (Bray-Curtis is for non-negative integers, which is not our data type).  
+
+
+```{r}
+# set up a loop to make a 2nd level header - ## - for each
+# key predictor  
+
+# below that, ### overall permanova, then if that's significant,
+# ### pairwise permanovas 
+
+# not sure permanova can handle numeric predictors, 
+# so only focusing on categorical
+
+
+key_preds_cat <- c("NERR_Region", "Salinity_category",
+                    "Geomorphology", "Tidal_Range")
+key_preds_num <- c("condition", "SLR_last19yrs",
+                    "SET_minus_SLR_19yrs", "proportion_low")
+
+set.seed(2025)
+
+for(i in seq_along(key_preds_cat)){
+    cat("\n\n---------------------------------------------------------- \n")
+    cat("---------------------------------------------------------- \n\n")
+    cat(paste0("~~~", key_preds_cat[i], "~~~\n\n"))
+
+    explanatory_tmp <- explanatory
+    names(explanatory_tmp)[which(names(explanatory_tmp) == key_preds_cat[i])] <- "predictor"
+    
+    perm <- adonis2(responses_scaled ~ predictor,
+                    data = explanatory_tmp,
+                    method = "euclidean",
+                    na.action = "na.omit"
+    )
+    
+    cat(paste0("PERMANOVA overall for ", key_preds_cat[i], "\n\n"))
+    print(perm)
+    
+    
+    if(perm$`Pr(>F)`[1] < 0.05){
+        cat(paste0("PERMANOVA for ", key_preds_cat[i], " was significant at the level alpha = 0.05. Pairwise tests follow. \n\n"))
+        cat(paste0("~~Pairwise PERMANOVA, ", key_preds_cat[i], "~~ \n\n"))
+        perm_pair <- permanova_pairwise(responses_scaled,
+                                        grp = explanatory_tmp$predictor,
+                                        method = "euclidean")
+        
+        print(perm_pair)
+        
+        cat("\n\n")
+       
+    }
+
+}
+```
+
+
+## PERMANOVA on community at start and end (paired measurements for each site)  
+
+Using community data here (at veg group level) rather than 'change'/slopes data frame.  
+
+```{r}
+dat.comm <- read.csv(here::here("data",
+                           "compiled",
+                           "veg_and_expl.csv"))
+```
+
+
+# Ordination - NMDS and BIO-ENV  
+
+NMDS and BIO-ENV are used in conjunction below. NMDS uses Euclidean distance. BIO-ENV is calculating Spearman correlation, using Euclidean distance for the response matrix (as does NMDS) and Gower's distance for the environmental variables (because Gower's distance can handle factors in addition to continuous data). Salinity and Tidal Range have been specified as ordered factors.   
+
+```{r}
+set.seed(1214)
+test_bioenv <- bioenv(responses_scaled, explanatory_scaled_main, 
+                      method = "spearman",
+                      index = "euclidean",
+                      metric = "gower")
+
+
+cat("Explanatory variables used in bioenv: \n", paste("*", names(explanatory_scaled_main)), sep = "\n")
+
+test_bioenv
+
+summary(test_bioenv)
+```
+
+## NMDS  
+
+```{r}
+set.seed(1214)
+veg_mds <- metaMDS(responses_scaled,
+                   distance = "euclidean",
+                   autotransform = FALSE,
+                   trace = FALSE)
+cat("2-dimensional stress: ", round(veg_mds$stress, 3))
+```
+
+```{r}
+data.scores <- as.data.frame(scores(veg_mds))
+loadings <- as.data.frame(scores(envfit(veg_mds, responses_scaled), display = "vectors")) *3
+
+# numeric explanatory loadings
+expl_numeric <- explanatory_scaled %>% 
+    select(SLR_last19yrs,
+           condition,
+           SET_minus_SLR_19yrs,
+           proportion_low)
+
+env_expl <- as.data.frame(scores(envfit(veg_mds, expl_numeric, na.rm = TRUE), display = "vectors")) *5
+
+```
+
+
+
+```{r}
+# plot all sites
+p <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_text(label = rownames(responses_scaled),
+              size = rel(3)) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+p
+
+# points only
+ppts <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_point() +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+```
+
+## Numeric Loadings overlaid - all  
+
+```{r}
+p2 <- ppts +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue")
+
+p2
+```
+
+
+## Color by categorical predictors that were important in bioenv  
+
+```{r}
+nmds_and_expl <- cbind(data.scores, explanatory_scaled_main)
+```
+
+```{r}
+plot_nmds2 <- function(expl_color){
+    
+p <- ggplot(nmds_and_expl,
+            aes(x = NMDS1,
+                y = NMDS2,
+                col = {{expl_color}})) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue") +
+    geom_point(size = 3, alpha = 0.8) +
+    khroma::scale_color_muted() +
+    theme_bw() +
+    labs(title = "NMDS")
+
+p
+}
+```
+
+```{r}
+plot_nmds2(NERR_Region) + labs(title = "NMDS for all regions", subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+## Bio-env best model graph  
+
+
+```{r}
+env_expl <- env_expl[1:2, ]
+```
+
+```{r}
+plot_nmds2(NERR_Region) + labs(title = "NMDS for all regions", subtitle = "blue = best quantitative predictor(s) from BIO-ENV; \nred = loadings in response matrix")
+```
+
+
+# NMDS on continuous environmental factors only  
+
+```{r}
+expl_scaled_continuous <- explanatory_scaled %>% 
+    select(SLR_last19yrs,
+           Latitude,
+           condition,
+           SET_change,
+           SET_minus_SLR_19yrs,
+           proportion_low,
+           siteAvg_distance_to_water,
+           siteAvg_orthometric_height)
+
+set.seed(1214)
+expl_nmds <- metaMDS(expl_scaled_continuous,
+                     distance = "euclidean",
+                     na.rm = TRUE,
+                     autotransform = FALSE,
+                     k = 3,
+                     trace = FALSE)
+
+expl_nmds$stress
+
+expl_loadings <- envfit(expl_nmds, expl_scaled_continuous, na.rm = TRUE)
+```
+
+```{r}
+data.scores <- as.data.frame(scores(expl_nmds))
+loadings <- as.data.frame(scores(expl_loadings, display = "vectors") * 2.5)
+
+loadings$factor <- rownames(loadings)
+
+data.scores <- cbind(data.scores, explanatory_scaled_main)
+
+ggplot(data.scores) +
+    geom_point(aes(x = NMDS1, y = NMDS2,
+                   col = NERR_Region),
+               size = 3) +
+    geom_segment(data = loadings,
+                 aes(x = 0, xend = NMDS1, 
+                     y = 0, yend = NMDS2),
+                 col = "red",
+                 arrow = arrow(length = unit(0.2, "cm"))) +
+    geom_text_repel(data = loadings,
+              aes(x = NMDS1,
+                  y = NMDS2,
+                  label = factor),
+              col = "red",
+              size = 4) +
+    theme_bw() +
+    khroma::scale_color_muted() +
+    labs(title = "NMDS of environmental predictors only",
+         subtitle = paste0("3d NMDS stress: ", round(expl_nmds$stress, 3)),
+         col = "NERR Region")
+```
+
+
+# Removing Gulf Sites   
+
+```{r}
+gulfsites <- which(dat_main$NERR_Region == "Gulf Coast")
+responses_scaled <- responses_scaled[-gulfsites, ]
+explanatory_scaled <- explanatory_scaled[-gulfsites, ]
+explanatory_scaled_main <- explanatory_scaled_main[-gulfsites, ]
+```
+
+
+
+```{r}
+set.seed(1214)
+test_bioenv <- bioenv(responses_scaled, explanatory_scaled_main, 
+                      method = "spearman",
+                      index = "euclidean",
+                      metric = "gower")
+
+
+cat("Explanatory variables used in bioenv: \n", paste("*", names(explanatory_scaled_main)), sep = "\n")
+
+test_bioenv
+
+summary(test_bioenv)
+```
+
+## NMDS  
+
+```{r}
+set.seed(1214)
+veg_mds <- metaMDS(responses_scaled,
+                   distance = "euclidean",
+                   autotransform = FALSE,
+                   trace = FALSE)
+cat("2-dimensional stress: ", round(veg_mds$stress, 3))
+```
+
+```{r}
+data.scores <- as.data.frame(scores(veg_mds))
+loadings <- as.data.frame(scores(envfit(veg_mds, responses_scaled), display = "vectors")) *3
+
+# numeric explanatory loadings
+expl_numeric <- explanatory_scaled %>% 
+    select(SLR_last19yrs,
+           condition,
+           SET_minus_SLR_19yrs,
+           proportion_low)
+
+env_expl <- as.data.frame(scores(envfit(veg_mds, expl_numeric, na.rm = TRUE), display = "vectors")) *5
+
+```
+
+
+
+```{r}
+# plot all sites
+p <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_text(label = rownames(responses_scaled),
+              size = rel(3)) +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+p
+
+# points only
+ppts <- ggplot(data.scores,
+            aes(x = NMDS1,
+                y = NMDS2)) +
+    geom_point() +
+    geom_segment(data = loadings,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "red") +
+    geom_text_repel(data = loadings,
+              label = rownames(loadings),
+              col = "red") +
+    labs(title = "NMDS",
+         subtitle = "All sites")
+```
+
+## Numeric Loadings overlaid - all  
+
+```{r}
+p2 <- ppts +
+    geom_segment(data = env_expl,
+                 aes(x = 0, y = 0,
+                     xend = NMDS1, yend = NMDS2),
+                 col = "blue") +
+    geom_text_repel(data = env_expl,
+              aes(x = NMDS1, y = NMDS2),
+              label = rownames(env_expl),
+              col = "blue")
+
+p2
+```
+
+
+## Color by categorical predictors that were important in bioenv  
+
+```{r}
+nmds_and_expl <- cbind(data.scores, explanatory_scaled_main)
+```
+
+```{r}
+plot_nmds2(Salinity_category) + labs(title = "NMDS excluding Gulf Sites", subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+
+plot_nmds2(NERR_Region) + labs(title = "NMDS excluding Gulf Sites", subtitle = "blue = quantitative environmental predictors; \nred = loadings in response matrix")
+```
+
+## Bio-env best model graph  
+
+
+```{r}
+env_expl <- env_expl[4, ]
+```
+
+```{r}
+plot_nmds2(Salinity_category) + labs(title = "NMDS excluding Gulf Sites", subtitle = "blue = best quantitative predictor(s) from BIO-ENV; \nred = loadings in response matrix")
+
+plot_nmds2(NERR_Region) + labs(title = "NMDS excluding Gulf Sites", subtitle = "blue = best quantitative predictor(s) from BIO-ENV; \nred = loadings in response matrix")
+```
+
+
+
